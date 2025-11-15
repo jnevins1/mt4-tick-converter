@@ -1,3 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MT4 Tick Converter</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:20px;background:#f9f9f9}
+  .c{max-width:800px;margin:auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,.1)}
+  input,select,button{margin:10px 0;padding:10px;font-size:16px;width:100%;box-sizing:border-box}
+  button{background:#007cba;color:#fff;border:none;cursor:pointer}
+  button:hover{background:#005a87}
+  .out{margin-top:20px}
+  .dl{background:#28a745;color:#fff;padding:10px;border-radius:5px;text-decoration:none;display:inline-block;margin:5px}
+  .log{font-family:monospace;background:#f0f0f0;padding:10px;border-radius:5px;max-height:200px;overflow:auto;margin:10px 0}
+</style>
+</head>
+<body>
+<div class="c">
+  <h1>MT4 .fxt + .hst Converter</h1>
+  <p>Format: <code>10.11.2025 00:00:00.056 GMT-0500 1.15611 1.1561 0.9 0.9</code></p>
+
+  <input type="file" id="csv" accept=".csv,.txt"><br>
+
+  <label>Symbol: <input type="text" id="sym" value="EURUSD"></label><br>
+  <label>Digits:
+    <select id="dig">
+      <option value="5">5 (EURUSD)</option>
+      <option value="3">3 (USDJPY)</option>
+    </select>
+  </label><br>
+
+  <button onclick="run()">Convert</button>
+
+  <div id="log" class="log"></div>
+  <div class="out" id="out"></div>
+</div>
+
 <script>
 // --- Web Worker (background parsing) ---
 const workerCode = `
@@ -8,7 +45,7 @@ self.onmessage = function(e) {
   let valid = 0;
 
   for (let i = 0; i < lines.length; i++) {
-    const parts = lines[i].trim().split(/\\s+/);
+    const parts = lines[i].trim().split(/\\\\s+/);
     if (parts.length < 7) continue;
 
     try {
@@ -133,3 +170,5 @@ function log(msg) {
   el.scrollTop = el.scrollHeight;
 }
 </script>
+</body>
+</html>
