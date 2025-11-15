@@ -1,5 +1,5 @@
 <script>
-// --- Web Worker (runs parsing in background) ---
+// --- Web Worker (background parsing) ---
 const workerCode = `
 self.onmessage = function(e) {
   const lines = e.data.lines;
@@ -74,7 +74,7 @@ worker.onmessage = function(e) {
   `;
 };
 
-// --- Existing makeFxt / makeHst (unchanged) ---
+// --- makeFxt ---
 function makeFxt(sym, dig, from, to, ticks) {
   const buf = new ArrayBuffer(40 + ticks.length * 72);
   const v = new DataView(buf);
@@ -94,6 +94,7 @@ function makeFxt(sym, dig, from, to, ticks) {
   return { url: URL.createObjectURL(blob), size: blob.size };
 }
 
+// --- makeHst ---
 function makeHst(sym, dig, from, to, ticks) {
   const day = {};
   ticks.forEach(t => {
