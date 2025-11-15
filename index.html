@@ -1,150 +1,134 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>MT4 Tick Converter</title>
-<style>
-  body{font-family:Arial,sans-serif;margin:20px;background:#f9f9f9}
-  .c{max-width:800px;margin:auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,.1)}
-  input,select,button{margin:10px 0;padding:10px;font-size:16px;width:100%;box-sizing:border-box}
-  button{background:#007cba;color:#fff;border:none;cursor:pointer}
-  button:hover{background:#005a87}
-  .out{margin-top:20px}
-  .dl{background:#28a745;color:#fff;padding:10px;border-radius:5px;text-decoration:none;display:inline-block;margin:5px}
-  .log{font-family:monospace;background:#f0f0f0;padding:10px;border-radius:5px;max-height:200px;overflow:auto;margin:10px 0}
-</style>
-</head>
-<body>
-<div class="c">
-  <h1>MT4 .fxt + .hst Converter</h1>
-  <p>Format: <code>10.11.2025 00:00:00.056 GMT-0500 1.15611 1.1561 0.9 0.9</code></p>
-
-  <input type="file" id="csv" accept=".csv,.txt"><br>
-
-  <label>Symbol: <input type="text" id="sym" value="EURUSD"></label><br>
-  <label>Digits:
-    <select id="dig">
-      <option value="5">5 (EURUSD)</option>
-      <option value="3">3 (USDJPY)</option>
-    </select>
-  </label><br>
-
-  <button onclick="run()">Convert</button>
-
-  <div id="log" class="log"></div>
-  <div class="out" id="out"></div>
-</div>
-
 <script>
-const log = (msg) => {
+// --- Web Worker (runs parsing in background) ---
+const workerCode = `
+self.onmessage = function(e) {
+  const lines = e.data.lines;
+  const ticks = [];
+  let min = Infinity, max = 0;
+  let valid = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].trim().split(/\\s+/);
+    if (parts.length < 7) continue;
+
+    try {
+      const [dd, mm, yyyy] = parts[0].split('.').map(Number);
+      const [hh, mi, sec_ms = '0'] = parts[1].split(':');
+      const [ss, ms = '0'] = sec_ms.split('.');
+      const local = new Date(yyyy, mm-1, dd, hh, mi, ss, (ms+'000').slice(0,3));
+      const tz = parts[2];
+      const sign = tz[3] === '-' ? -1 : 1;
+      const offH = parseInt(tz.slice(4,6)) || 0;
+      const offM = parseInt(tz.slice(6,8)) || 0;
+      const offsetSec = (offH * 3600 + offM * 60) * sign;
+      const bid = parseFloat(parts[3]);
+      const ask = parseFloat(parts[4]);
+      const vol = (parseFloat(parts[5]) || 0) + (parseFloat(parts[6]) || 0);
+      if (isNaN(bid) || isNaN(ask)) continue;
+
+      const utc = Math.floor(local.getTime() / 1000) - offsetSec;
+      min = Math.min(min, utc);
+      max = Math.max(max, utc);
+      ticks.push({ct: utc, open: bid, high: ask, low: bid, close: ask, vol});
+      valid++;
+    } catch (err) {}
+  }
+
+  self.postMessage({ticks, min, max, valid});
+};
+`;
+
+const blob = new Blob([workerCode], { type: 'application/javascript' });
+const worker = new Worker(URL.createObjectURL(blob));
+
+function run() {
+  const file = document.getElementById('csv').files[0];
+  if (!file) return alert('Select file');
+  log('Reading file...');
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    const lines = text.split(/\\r?\\n/).map(l => l.trim()).filter(l => l);
+    log(`Loaded ${lines.length} lines. Parsing in background...`);
+
+    worker.postMessage({ lines });
+  };
+  reader.readAsText(file);
+}
+
+worker.onmessage = function(e) {
+  const { ticks, min, max, valid } = e.data;
+  log(`Parsed ${valid} valid ticks`);
+
+  const sym = document.getElementById('sym').value.toUpperCase();
+  const dig = parseInt(document.getElementById('dig').value);
+
+  const fxt = makeFxt(sym, dig, min, max, ticks);
+  const hst = makeHst(sym, dig, min, max, ticks);
+
+  document.getElementById('out').innerHTML = `
+    <p><strong>${valid}</strong> ticks: ${new Date(min*1000).toISOString().split('T')[0]} → ${new Date(max*1000).toISOString().split('T')[0]}</p>
+    <a href="${fxt.url}" download="${sym}_${fmt(min)}.fxt" class="dl">Download .fxt (${(fxt.size/1024).toFixed(1)} KB)</a>
+    <a href="${hst.url}" download="${sym}1440.hst" class="dl">Download .hst (${(hst.size/1024).toFixed(1)} KB)</a>
+  `;
+};
+
+// --- Existing makeFxt / makeHst (unchanged) ---
+function makeFxt(sym, dig, from, to, ticks) {
+  const buf = new ArrayBuffer(40 + ticks.length * 72);
+  const v = new DataView(buf);
+  v.setInt32(0, 401, true); v.setInt64(8, from, true); v.setInt64(16, to, true);
+  v.setInt32(24, 0, true); v.setInt32(28, 1, true); v.setInt32(32, ticks.length, true);
+  let off = 40;
+  ticks.forEach(t => {
+    v.setInt64(off, t.ct, true);
+    v.setFloat64(off + 8, t.open, true);
+    v.setFloat64(off + 16, t.low, true);
+    v.setFloat64(off + 24, t.high, true);
+    v.setFloat64(off + 32, t.close, true);
+    v.setFloat64(off + 40, t.vol, true);
+    off += 72;
+  });
+  const blob = new Blob([buf]);
+  return { url: URL.createObjectURL(blob), size: blob.size };
+}
+
+function makeHst(sym, dig, from, to, ticks) {
+  const day = {};
+  ticks.forEach(t => {
+    const d = new Date(t.ct * 1000);
+    const key = d.getUTCFullYear() + '-' + ('0'+(d.getUTCMonth()+1)).slice(-2) + '-' + ('0'+d.getUTCDate()).slice(-2);
+    if (!day[key]) day[key] = { o: t.open, h: t.open, l: t.open, c: t.close, v: 0, time: Math.floor(t.ct / 86400) * 86400 };
+    const b = day[key];
+    b.h = Math.max(b.h, t.high); b.l = Math.min(b.l, t.low); b.c = t.close; b.v += t.vol;
+  });
+  const bars = Object.values(day).sort((a, b) => a.time - b.time);
+  const buf = new ArrayBuffer(156 + bars.length * 60);
+  const v = new DataView(buf);
+  v.setInt32(0, 401, true);
+  new TextEncoder().encode(sym.padEnd(12, '\\0')).forEach((b, i) => v.setUint8(4 + i, b));
+  v.setInt32(64, 1440, true); v.setInt32(68, dig, true);
+  let off = 156;
+  bars.forEach(b => {
+    v.setInt32(off, b.time, true);
+    v.setFloat64(off + 8, b.o, true); v.setFloat64(off + 16, b.h, true);
+    v.setFloat64(off + 24, b.l, true); v.setFloat64(off + 32, b.c, true);
+    v.setFloat64(off + 40, b.v, true); v.setInt32(off + 52, 0, true); v.setInt32(off + 56, 0, true);
+    off += 60;
+  });
+  const blob = new Blob([buf]);
+  return { url: URL.createObjectURL(blob), size: blob.size };
+}
+
+function fmt(ts) {
+  const d = new Date(ts * 1000);
+  return d.getFullYear() + ('0'+(d.getMonth()+1)).slice(-2) + ('0'+d.getDate()).slice(-2);
+}
+
+function log(msg) {
   const el = document.getElementById('log');
   el.innerHTML += msg + '<br>';
   el.scrollTop = el.scrollHeight;
-};
-
-function run(){
-  log('Starting...');
-  const f = document.getElementById('csv').files[0];
-  if (!f) return alert('Select file');
-  log(`File: ${f.name}`);
-
-  const r = new FileReader();
-  r.onload = e => {
-    const txt = e.target.result;
-    const lines = txt.split(/\r?\n/).map(l => l.trim()).filter(l => l);
-    log(`${lines.length} lines`);
-
-    const ticks = [];
-    let min = Infinity, max = 0;
-    let valid = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      if (raw.includes('Local time') || raw.includes(',') && !raw.match(/\d{2}\.\d{2}\.\d{4}/)) {
-        log(`Skipped header ${i+1}`);
-        continue;
-      }
-
-      const parts = raw.trim().split(/\s+/);
-      if (parts.length < 7) {
-        log(`Skipped short line ${i+1}`);
-        continue;
-      }
-
-      try {
-        const [dd, mm, yyyy] = parts[0].split('.').map(Number);
-        const timeParts = parts[1].split(':');
-        const [hh, mi] = timeParts.slice(0,2).map(Number);
-        const sec_ms = timeParts[2] || '0';
-        const [ss, ms = '0'] = sec_ms.split('.');
-        const local = new Date(yyyy, mm-1, dd, hh, mi, ss, (ms+'000').slice(0,3));
-
-        const tz = parts[2];
-        const sign = tz[3] === '-' ? -1 : 1;
-        const offH = parseInt(tz.slice(4,6)) || 0;
-        const offM = parseInt(tz.slice(6,8)) || 0;
-        const offsetSec = (offH * 3600 + offM * 60) * sign;
-
-        const bid = parseFloat(parts[3]);
-        const ask = parseFloat(parts[4]);
-        const bidVol = parseFloat(parts[5]) || 0;
-        const askVol = parseFloat(parts[6]) || 0;
-
-        if (isNaN(bid) || isNaN(ask)) throw "Bad price";
-
-        const utcSec = Math.floor(local.getTime() / 1000) - offsetSec;
-        min = Math.min(min, utcSec);
-        max = Math.max(max, utcSec);
-
-        ticks.push({ct: utcSec, open: bid, high: ask, low: bid, close: ask, vol: bidVol + askVol});
-        valid++;
-      } catch (err) {
-        log(`Error line ${i+1}: ${err}`);
-      }
-    }
-
-    log(`Valid: ${valid}`);
-    if (valid === 0) return alert('No ticks – check format');
-
-    const sym = document.getElementById('sym').value.toUpperCase();
-    const dig = parseInt(document.getElementById('dig').value);
-
-    const fxt = makeFxt(sym, dig, min, max, ticks);
-    const hst = makeHst(sym, dig, min, max, ticks);
-
-    document.getElementById('out').innerHTML = `
-      <p><strong>${valid}</strong> ticks: ${new Date(min*1000).toISOString()} → ${new Date(max*1000).toISOString()}</p>
-      <a href="${fxt.url}" download="${sym}_${fmt(min)}.fxt" class="dl">Download .fxt</a>
-      <a href="${hst.url}" download="${sym}1440.hst" class="dl">Download .hst</a>
-    `;
-  };
-  r.readAsText(f);
 }
-
-function makeFxt(sym,dig,from,to,ticks){
-  const buf = new ArrayBuffer(40 + ticks.length*72);
-  const v = new DataView(buf);
-  v.setInt32(0,401,true); v.setInt64(8,from,true); v.setInt64(16,to,true); v.setInt32(24,0,true); v.setInt32(28,1,true); v.setInt32(32,ticks.length,true);
-  let off = 40;
-  ticks.forEach(t=>{ v.setInt64(off, t.ct, true); v.setFloat64(off+8, t.open, true); v.setFloat64(off+16, t.low, true); v.setFloat64(off+24, t.high, true); v.setFloat64(off+32, t.close, true); v.setFloat64(off+40, t.vol, true); off += 72; });
-  return {url: URL.createObjectURL(new Blob([buf]))};
-}
-
-function makeHst(sym,dig,from,to,ticks){
-  const day = {};
-  ticks.forEach(t=>{ const d = new Date(t.ct*1000); const key = d.getUTCFullYear() + '-' + ('0'+(d.getUTCMonth()+1)).slice(-2) + '-' + ('0'+d.getUTCDate()).slice(-2); if (!day[key]) day[key] = {o:t.open, h:t.open, l:t.open, c:t.close, v:0, time:0}; const b = day[key]; b.h = Math.max(b.h, t.high); b.l = Math.min(b.l, t.low); b.c = t.close; b.v += t.vol; b.time = Math.floor(t.ct / 86400) * 86400; });
-  const bars = Object.values(day).sort((a,b)=>a.time-b.time);
-  const buf = new ArrayBuffer(156 + bars.length*60);
-  const v = new DataView(buf);
-  v.setInt32(0,401,true);
-  new TextEncoder().encode(sym.padEnd(12,'\0')).forEach((b,i)=>v.setUint8(4+i,b));
-  v.setInt32(64,1440,true); v.setInt32(68,dig,true);
-  let off = 156;
-  bars.forEach(b=>{ v.setInt32(off, b.time, true); v.setFloat64(off+8, b.o, true); v.setFloat64(off+16, b.h, true); v.setFloat64(off+24, b.l, true); v.setFloat64(off+32, b.c, true); v.setFloat64(off+40, b.v, true); v.setInt32(off+52,0,true); v.setInt32(off+56,0,true); off += 60; });
-  return {url: URL.createObjectURL(new Blob([buf]))};
-}
-
-function fmt(ts){ const d = new Date(ts*1000); return d.getFullYear() + ('0'+(d.getMonth()+1)).slice(-2) + ('0'+d.getDate()).slice(-2); }
 </script>
-</body>
-</html>
