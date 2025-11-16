@@ -2,233 +2,283 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>MT4 Tick Converter</title>
+<title>MT4 Tick Converter (M1 ready)</title>
 <style>
-  body{font-family:Arial,sans-serif;margin:20px;background:#f9f9f9}
-  .c{max-width:800px;margin:auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,.1)}
-  input,select,button{margin:10px 0;padding:10px;font-size:16px;width:100%;box-sizing:border-box}
-  button{background:#007cba;color:#fff;border:none;cursor:pointer}
-  button:hover{background:#005a87}
-  .out{margin-top:20px}
-  .dl{background:#28a745;color:#fff;padding:10px;border-radius:5px;text-decoration:none;display:inline-block;margin:5px}
-  .log{font-family:monospace;background:#f0f0f0;padding:10px;border-radius:5px;max-height:200px;overflow:auto;margin:10px 0}
-  iframe{width:100%;border:1px solid #ccc;margin-top:20px}
+body{font-family:Arial,sans-serif;margin:20px;background:#f9f9f9}
+.c{max-width:960px;margin:auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,.1)}
+input,select,button{margin:10px 0;padding:10px;font-size:16px;width:100%;box-sizing:border-box}
+.inline{display:flex;gap:10px}
+.inline input,.inline select{width:calc(50% - 5px)}
+button{background:#007cba;color:#fff;border:none;cursor:pointer;padding:12px 16px}
+button:hover{background:#005a87}
+button:disabled{background:#999;cursor:not-allowed}
+.out{margin-top:20px}
+.dl{background:#28a745;color:#fff;padding:10px;border-radius:5px;text-decoration:none;display:inline-block;margin:5px}
+.log{font-family:monospace;background:#f0f0f0;padding:10px;border-radius:5px;max-height:220px;overflow:auto;margin:10px 0}
+.progress-wrap{background:#eee;border-radius:6px;padding:6px;margin:8px 0}
+.progress-bar{height:14px;background:#28a745;border-radius:4px;width:0%;transition:width .2s}
 </style>
 </head>
 <body>
 <div class="c">
-  <h1>MT4 .fxt + .hst Converter</h1>
-  <p>Format: <code>10.11.2025 00:00:00.056 GMT-0500,1.15611,1.1561,0.9,0.9</code></p>
+<h1>MT4 .fxt + .hst Converter</h1>
+<p>Expected CSV/tick format (TAB or comma-separated):<br>
+<code>10.11.2025 00:00:29.017 GMT-0500 [TAB] 1.15613 [TAB] 1.15609 [TAB] 0.9 [TAB] 0.9</code></p>
 
-  <input type="file" id="csv" accept=".csv,.txt"><br>
+<input type="file" id="csv" accept=".csv,.txt"><br>
 
-  <label>Symbol: <input type="text" id="sym" value="EURUSD"></label><br>
-  <label>Digits:
-    <select id="dig">
-      <option value="5">5 (EURUSD)</option>
-      <option value="3">3 (USDJPY)</option>
-    </select>
-  </label><br>
+<div class="inline">
+<label>Symbol:
+<input type="text" id="sym" value="EURUSD">
+</label>
+<label>Digits:
+<select id="dig">
+<option value="5">5 (EURUSD)</option>
+<option value="3">3 (USDJPY)</option>
+</select>
+</label>
+</div>
 
-  <button onclick="run()">Convert</button>
+<div class="inline">
+<label>Timeframe:
+<select id="tf">
+<option value="1" selected>M1 (1)</option>
+<option value="5">M5 (5)</option>
+<option value="15">M15 (15)</option>
+<option value="30">M30 (30)</option>
+<option value="60">H1 (60)</option>
+<option value="240">H4 (240)</option>
+<option value="1440">D1 (1440)</option>
+</select>
+</label>
 
-  <div id="log" class="log"></div>
-  <div class="out" id="out"></div>
+<label>
+<button id="convertBtn">Convert</button>
+</label>
+</div>
 
-  <h2>Download Historical Data from Dukascopy</h2>
-  <p>Use the tool below to get historical tick data for your instrument:</p>
-  <div id="dukascopy"></div>
+<div class="progress-wrap" id="progressWrap" style="display:none">
+<div style="font-size:13px" id="progressText">Parsing progress: 0%</div>
+<div style="margin-top:6px;background:#ddd;border-radius:4px;height:16px">
+<div class="progress-bar" id="progressBar"></div>
+</div>
+</div>
+
+<div id="log" class="log"></div>
+<div class="out" id="out"></div>
+
+<h2>Download Historical Data from Dukascopy</h2>
+<p>Use the tool below to fetch tick data (then download CSV and convert):</p>
+<div id="dukascopy"></div>
 </div>
 
 <script type="text/javascript">
 DukascopyApplet = {
-  "type":"historical_data_feed",
-  "params":{
-    "header":false,
-    "availableInstruments":"l:",
-    "width":"100%",
-    "height":"550",
-    "adv":"popup"
-  }
+"type":"historical_data_feed",
+"params":{
+"header":false,
+"availableInstruments":"l:",
+"width":"100%",
+"height":"550",
+"adv":"popup"
+}
 };
 </script>
 <script type="text/javascript" src="https://freeserv-static.dukascopy.com/2.0/core.js"></script>
 
 <script>
-// --- Web Worker (robust CSV parser) ---
-const workerCode = `
-self.onmessage = function(e) {
-  const lines = e.data.lines;
+function log(msg){ 
+  const el=document.getElementById('log'); 
+  el.innerHTML += msg+'<br>'; 
+  el.scrollTop = el.scrollHeight; 
+}
+
+function setProgress(percent){
+  document.getElementById('progressWrap').style.display = percent>=0?'block':'none';
+  document.getElementById('progressText').innerText = 'Parsing progress: '+percent+'%';
+  document.getElementById('progressBar').style.width = percent+'%';
+}
+
+// Parse ticks without Web Worker (runs in main thread)
+function parseTicks(lines, onProgress) {
   const ticks = [];
   let min = Infinity, max = 0;
   let valid = 0;
-  let skipped = 0;
+  const total = lines.length || 1;
+  let lastPercent = -1;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-
-    // Dukascopy CSV format: date time tz,bid,ask,vol1,vol2
-    const parts = line.split(/[,]+/).map(p => p.trim());
-    if (parts.length < 5) {
-      skipped++;
-      continue;
-    }
+    const parts = line.split(/[\t, ]+/);
+    if (parts.length < 5) continue;
 
     try {
       const [dd, mm, yyyy] = parts[0].split('.').map(Number);
-      const [hh, mi, ss_ms='0'] = parts[1].split(':');
-      const [ss, ms='0'] = ss_ms.split('.');
+      const [hh, mi, sec_ms='0'] = parts[1].split(':');
+      const [ss, ms='0'] = sec_ms.split('.');
+      const msNum = (ms + '000').slice(0,3);
+      const local = new Date(yyyy, mm-1, dd, hh, mi, ss, msNum);
+      const tz = parts[2] || 'GMT+0000';
+      const sign = tz[3] === '-' ? -1 : 1;
+      const offH = parseInt(tz.slice(4,6)) || 0;
+      const offM = parseInt(tz.slice(6,8)) || 0;
+      const offsetSec = (offH*3600 + offM*60)*sign;
 
-      const bid = parseFloat(parts[2]);
-      const ask = parseFloat(parts[3]);
-      const vol1 = parseFloat(parts[4]) || 0;
-      const vol2 = parseFloat(parts[5]) || 0;
+      const bid = parseFloat(parts[3]);
+      const ask = parseFloat(parts[4]);
+      const vol = (parseFloat(parts[5]) || 0) + (parseFloat(parts[6]) || 0);
+      if (isNaN(bid) || isNaN(ask)) continue;
 
-      // Parse timezone offset (GMT-0500)
-      let tzOffset = 0;
-      if (parts[1] && parts[1].includes('GMT')) {
-        const tz = parts[1].match(/GMT([+-])(\\d{2})(\\d{2})/);
-        if (tz) {
-          const sign = tz[1] === '-' ? -1 : 1;
-          const offH = parseInt(tz[2]) || 0;
-          const offM = parseInt(tz[3]) || 0;
-          tzOffset = sign * (offH*3600 + offM*60);
-        }
-      }
-
-      const utc = Date.UTC(yyyy, mm-1, dd, hh, mi, ss, ms.padEnd(3,'0')) / 1000 - tzOffset;
-
-      if (isNaN(bid) || isNaN(ask)) {
-        skipped++;
-        continue;
-      }
-
-      ticks.push({
-        ct: Math.floor(utc),
-        open: bid,
-        high: Math.max(bid, ask),
-        low: Math.min(bid, ask),
-        close: bid,
-        vol: vol1 + vol2
-      });
-
+      const utc = Math.floor(local.getTime()/1000) - offsetSec;
       min = Math.min(min, utc);
       max = Math.max(max, utc);
+      ticks.push({ct:utc,open:bid,high:ask,low:bid,close:ask,vol});
       valid++;
+    } catch(err) {}
 
-    } catch(err) {
-      skipped++;
-      continue;
+    if(i % 5000 === 0 || i === lines.length-1){
+      const p = Math.floor((i/total)*100);
+      if(p !== lastPercent){ 
+        lastPercent = p; 
+        onProgress(p);
+      }
     }
   }
 
-  self.postMessage({ ticks, min, max, valid, skipped });
-};
-`;
+  return {ticks, min, max, valid};
+}
 
-const blob = new Blob([workerCode], { type: 'application/javascript' });
-const worker = new Worker(URL.createObjectURL(blob));
-
-function run() {
-  const file = document.getElementById('csv').files[0];
-  if (!file) return alert('Select a file');
+function run(){
+  const file=document.getElementById('csv').files[0];
+  if(!file){alert('Select a CSV or TXT file');return;}
+  document.getElementById('convertBtn').disabled=true;
   log('Reading file...');
+  setProgress(0);
 
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    const text = e.target.result;
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l);
-    log(\`Loaded \${lines.length} lines. Parsing in background...\`);
+  const reader=new FileReader();
+  reader.onload=function(e){
+    const text=e.target.result;
+    const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
+    log('Loaded '+lines.length+' lines. Starting parse...');
+    
+    // Use setTimeout to allow UI to update
+    setTimeout(() => {
+      const result = parseTicks(lines, setProgress);
+      
+      setProgress(100);
+      const {ticks,min,max,valid} = result;
+      log('Parsing complete. Valid ticks: '+valid);
+      
+      if(!ticks||ticks.length===0){
+        log('No ticks parsed. Check file format.');
+        document.getElementById('convertBtn').disabled=false;
+        return;
+      }
 
-    worker.postMessage({ lines });
+      const sym=document.getElementById('sym').value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+      const dig=parseInt(document.getElementById('dig').value)||5;
+      const timeframe=parseInt(document.getElementById('tf').value)||1;
+
+      const fxt=makeFxt(sym,dig,min,max,ticks);
+      const hst=makeHst(sym,dig,timeframe,min,max,ticks);
+
+      document.getElementById('out').innerHTML=`
+<p><strong>${valid}</strong> ticks: ${new Date(min*1000).toISOString().split('T')[0]} → ${new Date(max*1000).toISOString().split('T')[0]}</p>
+<a href="${fxt.url}" download="${sym}_${fmt(min)}.fxt" class="dl">Download .fxt (${(fxt.size/1024).toFixed(1)} KB)</a>
+<a href="${hst.url}" download="${sym}${timeframe}.hst" class="dl">Download .hst (${(hst.size/1024).toFixed(1)} KB)</a>
+`;
+      log('Files ready. Save them to your MT4 tester/ and history/ folders.');
+      document.getElementById('convertBtn').disabled=false;
+    }, 100);
   };
+  
+  reader.onerror=function(){
+    alert('Failed to read file');
+    document.getElementById('convertBtn').disabled=false;
+    setProgress(-1);
+  }
   reader.readAsText(file);
 }
 
-worker.onmessage = function(e) {
-  const { ticks, min, max, valid, skipped } = e.data;
-  log(\`Parsed \${valid} valid ticks, skipped \${skipped} invalid lines.\`);
+// Attach event listener
+document.getElementById('convertBtn').addEventListener('click', run);
 
-  const sym = document.getElementById('sym').value.toUpperCase();
-  const dig = parseInt(document.getElementById('dig').value);
-
-  const fxt = makeFxt(sym, dig, min, max, ticks);
-  const hst = makeHst(sym, dig, min, max, ticks);
-
-  document.getElementById('out').innerHTML = \`
-    <p><strong>\${valid}</strong> ticks: \${new Date(min*1000).toISOString().split('T')[0]} → \${new Date(max*1000).toISOString().split('T')[0]}</p>
-    <a href="\${fxt.url}" download="\${sym}_\${fmt(min)}.fxt" class="dl">Download .fxt (\${(fxt.size/1024).toFixed(1)} KB)</a>
-    <a href="\${hst.url}" download="\${sym}1440.hst" class="dl">Download .hst (\${(hst.size/1024).toFixed(1)} KB)</a>
-  \`;
-};
-
-// --- FXT generator ---
-function makeFxt(sym, dig, from, to, ticks) {
-  const buf = new ArrayBuffer(40 + ticks.length * 72);
-  const v = new DataView(buf);
-  v.setInt32(0, 401, true);
-  v.setBigInt64(8, BigInt(from), true);
-  v.setBigInt64(16, BigInt(to), true);
-  v.setInt32(24, 0, true);
-  v.setInt32(28, 1, true);
-  v.setInt32(32, ticks.length, true);
-  let off = 40;
-  ticks.forEach(t => {
-    v.setBigInt64(off, BigInt(t.ct), true);
-    v.setFloat64(off + 8, t.open, true);
-    v.setFloat64(off + 16, t.low, true);
-    v.setFloat64(off + 24, t.high, true);
-    v.setFloat64(off + 32, t.close, true);
-    v.setFloat64(off + 40, t.vol, true);
-    off += 72;
+// FXT builder
+function makeFxt(sym,dig,from,to,ticks){
+  const buf=new ArrayBuffer(40+ticks.length*72);
+  const v=new DataView(buf);
+  v.setInt32(0,401,true);
+  if(typeof v.setBigInt64==='function'){
+    v.setBigInt64(8,BigInt(from),true);
+    v.setBigInt64(16,BigInt(to),true);
+  } else {
+    v.setInt32(8,from,true);
+    v.setInt32(16,to,true);
+  }
+  v.setInt32(24,0,true);
+  v.setInt32(28,1,true);
+  v.setInt32(32,ticks.length,true);
+  let off=40;
+  ticks.forEach(t=>{
+    if(typeof v.setBigInt64==='function'){
+      v.setBigInt64(off,BigInt(t.ct),true);
+    } else {
+      v.setInt32(off,t.ct,true);
+    }
+    v.setFloat64(off+8,t.open,true);
+    v.setFloat64(off+16,t.low,true);
+    v.setFloat64(off+24,t.high,true);
+    v.setFloat64(off+32,t.close,true);
+    v.setFloat64(off+40,t.vol,true);
+    off+=72;
   });
-  const blob = new Blob([buf]);
-  return { url: URL.createObjectURL(blob), size: blob.size };
+  const blob=new Blob([buf]);
+  return {url:URL.createObjectURL(blob),size:blob.size};
 }
 
-// --- HST generator ---
-function makeHst(sym, dig, from, to, ticks) {
-  const day = {};
-  ticks.forEach(t => {
-    const d = new Date(t.ct * 1000);
-    const key = d.getUTCFullYear() + '-' + ('0'+(d.getUTCMonth()+1)).slice(-2) + '-' + ('0'+d.getUTCDate()).slice(-2);
-    if (!day[key]) day[key] = { o: t.open, h: t.open, l: t.open, c: t.close, v: 0, time: Math.floor(t.ct / 86400) * 86400 };
-    const b = day[key];
-    b.h = Math.max(b.h, t.high); b.l = Math.min(b.l, t.low); b.c = t.close; b.v += t.vol;
+// HST builder
+function makeHst(sym,dig,timeframe,from,to,ticks){
+  const tfSeconds=timeframe*60;
+  const buckets={};
+  ticks.forEach(t=>{
+    const bucketStart=Math.floor(t.ct/tfSeconds)*tfSeconds;
+    if(!buckets[bucketStart]){
+      buckets[bucketStart]={o:t.open,h:t.high,l:t.low,c:t.close,v:t.vol,time:bucketStart};
+    } else {
+      const b=buckets[bucketStart];
+      b.h=Math.max(b.h,t.high);
+      b.l=Math.min(b.l,t.low);
+      b.c=t.close;
+      b.v+=t.vol;
+    }
   });
-  const bars = Object.values(day).sort((a, b) => a.time - b.time);
-  const buf = new ArrayBuffer(156 + bars.length * 60);
-  const v = new DataView(buf);
-  v.setInt32(0, 401, true);
+  const bars=Object.values(buckets).sort((a,b)=>a.time-b.time);
+  const buf=new ArrayBuffer(156+bars.length*60);
+  const v=new DataView(buf);
+  v.setInt32(0,401,true);
   new TextEncoder().encode(sym.padEnd(12,'\0')).forEach((b,i)=>v.setUint8(4+i,b));
-  v.setInt32(64, 1440, true);
-  v.setInt32(68, dig, true);
-  let off = 156;
-  bars.forEach(b => {
-    v.setInt32(off, b.time, true);
-    v.setFloat64(off + 8, b.o, true);
-    v.setFloat64(off + 16, b.h, true);
-    v.setFloat64(off + 24, b.l, true);
-    v.setFloat64(off + 32, b.c, true);
-    v.setFloat64(off + 40, b.v, true);
-    v.setInt32(off + 52, 0, true);
-    v.setInt32(off + 56, 0, true);
-    off += 60;
+  v.setInt32(64,timeframe,true);
+  v.setInt32(68,dig,true);
+  let off=156;
+  bars.forEach(b=>{
+    v.setInt32(off,b.time,true);
+    v.setFloat64(off+8,b.o,true);
+    v.setFloat64(off+16,b.h,true);
+    v.setFloat64(off+24,b.l,true);
+    v.setFloat64(off+32,b.c,true);
+    v.setFloat64(off+40,b.v,true);
+    v.setInt32(off+52,0,true);
+    v.setInt32(off+56,0,true);
+    off+=60;
   });
-  const blob = new Blob([buf]);
-  return { url: URL.createObjectURL(blob), size: blob.size };
+  const blob=new Blob([buf]);
+  return {url:URL.createObjectURL(blob),size:blob.size};
 }
 
-function fmt(ts) {
-  const d = new Date(ts * 1000);
-  return d.getFullYear() + ('0'+(d.getMonth()+1)).slice(-2) + ('0'+d.getDate()).slice(-2);
-}
-
-function log(msg) {
-  const el = document.getElementById('log');
-  el.innerHTML += msg + '<br>';
-  el.scrollTop = el.scrollHeight;
+function fmt(ts){
+  const d=new Date(ts*1000);
+  return d.getFullYear()+('0'+(d.getMonth()+1)).slice(-2)+('0'+d.getDate()).slice(-2);
 }
 </script>
 </body>
