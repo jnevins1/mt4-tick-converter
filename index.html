@@ -11,7 +11,6 @@ input,select,button{margin:10px 0;padding:10px;font-size:16px;width:100%;box-siz
 .inline input,.inline select{width:calc(50% - 5px)}
 button{background:#007cba;color:#fff;border:none;cursor:pointer;padding:12px 16px}
 button:hover{background:#005a87}
-button:disabled{background:#999;cursor:not-allowed}
 .out{margin-top:20px}
 .dl{background:#28a745;color:#fff;padding:10px;border-radius:5px;text-decoration:none;display:inline-block;margin:5px}
 .log{font-family:monospace;background:#f0f0f0;padding:10px;border-radius:5px;max-height:220px;overflow:auto;margin:10px 0}
@@ -53,7 +52,7 @@ button:disabled{background:#999;cursor:not-allowed}
 </label>
 
 <label>
-<button id="convertBtn">Convert</button>
+<button id="convertBtn" onclick="run()">Convert</button>
 </label>
 </div>
 
@@ -87,199 +86,146 @@ DukascopyApplet = {
 <script type="text/javascript" src="https://freeserv-static.dukascopy.com/2.0/core.js"></script>
 
 <script>
-function log(msg){ 
-  const el=document.getElementById('log'); 
-  el.innerHTML += msg+'<br>'; 
-  el.scrollTop = el.scrollHeight; 
-}
+// --- Worker code as array to avoid syntax errors ---
+const workerCode = [
+"self.onmessage = function(e) {",
+"  const lines = e.data.lines;",
+"  const ticks = [];",
+"  let min = Infinity, max = 0, valid = 0;",
+"  const total = lines.length || 1;",
+"  let lastPercent = -1;",
+"  for (let i=0;i<lines.length;i++){",
+"    const line = lines[i].trim();",
+"    if(!line) continue;",
+"    const parts = line.split(/[\\t, ]+/);",
+"    if(parts.length < 5) continue;",
+"    try {",
+"      const [dd,mm,yyyy] = parts[0].split('.').map(Number);",
+"      const [hh,mi,sec_ms='0'] = parts[1].split(':');",
+"      const [ss,ms='0'] = sec_ms.split('.');",
+"      const local = new Date(yyyy, mm-1, dd, hh, mi, ss, (ms+'000').slice(0,3));",
+"      const tz = parts[2] || 'GMT+0000';",
+"      const sign = tz[3]==='-'?-1:1;",
+"      const offH=parseInt(tz.slice(4,6))||0;",
+"      const offM=parseInt(tz.slice(6,8))||0;",
+"      const offsetSec=(offH*3600+offM*60)*sign;",
+"      const bid=parseFloat(parts[3]);",
+"      const ask=parseFloat(parts[4]);",
+"      const vol=(parseFloat(parts[5])||0)+(parseFloat(parts[6])||0);",
+"      if(isNaN(bid)||isNaN(ask)) continue;",
+"      const utc=Math.floor(local.getTime()/1000)-offsetSec;",
+"      min=Math.min(min,utc); max=Math.max(max,utc);",
+"      ticks.push({ct:utc,open:bid,high:ask,low:bid,close:ask,vol});",
+"      valid++;",
+"    } catch(err) {}",
+"    if(i%10000===0||i===lines.length-1){",
+"      const p=Math.floor((i/total)*100);",
+"      if(p!==lastPercent){ lastPercent=p; self.postMessage({progress:p}); }",
+"    }",
+"  }",
+"  self.postMessage({ticks,min,max,valid});",
+"}"
+].join("\n");
 
+const blob = new Blob([workerCode], {type:'application/javascript'});
+const worker = new Worker(URL.createObjectURL(blob));
+
+function log(msg){ const el=document.getElementById('log'); el.innerHTML += msg+'<br>'; el.scrollTop = el.scrollHeight; }
 function setProgress(percent){
-  document.getElementById('progressWrap').style.display = percent>=0?'block':'none';
-  document.getElementById('progressText').innerText = 'Parsing progress: '+percent+'%';
-  document.getElementById('progressBar').style.width = percent+'%';
-}
-
-// Parse ticks without Web Worker (runs in main thread)
-function parseTicks(lines, onProgress) {
-  const ticks = [];
-  let min = Infinity, max = 0;
-  let valid = 0;
-  const total = lines.length || 1;
-  let lastPercent = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const parts = line.split(/[\t, ]+/);
-    if (parts.length < 5) continue;
-
-    try {
-      const [dd, mm, yyyy] = parts[0].split('.').map(Number);
-      const [hh, mi, sec_ms='0'] = parts[1].split(':');
-      const [ss, ms='0'] = sec_ms.split('.');
-      const msNum = (ms + '000').slice(0,3);
-      const local = new Date(yyyy, mm-1, dd, hh, mi, ss, msNum);
-      const tz = parts[2] || 'GMT+0000';
-      const sign = tz[3] === '-' ? -1 : 1;
-      const offH = parseInt(tz.slice(4,6)) || 0;
-      const offM = parseInt(tz.slice(6,8)) || 0;
-      const offsetSec = (offH*3600 + offM*60)*sign;
-
-      const bid = parseFloat(parts[3]);
-      const ask = parseFloat(parts[4]);
-      const vol = (parseFloat(parts[5]) || 0) + (parseFloat(parts[6]) || 0);
-      if (isNaN(bid) || isNaN(ask)) continue;
-
-      const utc = Math.floor(local.getTime()/1000) - offsetSec;
-      min = Math.min(min, utc);
-      max = Math.max(max, utc);
-      ticks.push({ct:utc,open:bid,high:ask,low:bid,close:ask,vol});
-      valid++;
-    } catch(err) {}
-
-    if(i % 5000 === 0 || i === lines.length-1){
-      const p = Math.floor((i/total)*100);
-      if(p !== lastPercent){ 
-        lastPercent = p; 
-        onProgress(p);
-      }
-    }
-  }
-
-  return {ticks, min, max, valid};
+document.getElementById('progressWrap').style.display = percent>=0?'block':'none';
+document.getElementById('progressText').innerText = 'Parsing progress: '+percent+'%';
+document.getElementById('progressBar').style.width = percent+'%';
 }
 
 function run(){
-  const file=document.getElementById('csv').files[0];
-  if(!file){alert('Select a CSV or TXT file');return;}
-  document.getElementById('convertBtn').disabled=true;
-  log('Reading file...');
-  setProgress(0);
+const file=document.getElementById('csv').files[0];
+if(!file){alert('Select a CSV or TXT file');return;}
+document.getElementById('convertBtn').disabled=true;
+log('Reading file...');
+setProgress(0);
 
-  const reader=new FileReader();
-  reader.onload=function(e){
-    const text=e.target.result;
-    const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
-    log('Loaded '+lines.length+' lines. Starting parse...');
-    
-    // Use setTimeout to allow UI to update
-    setTimeout(() => {
-      const result = parseTicks(lines, setProgress);
-      
-      setProgress(100);
-      const {ticks,min,max,valid} = result;
-      log('Parsing complete. Valid ticks: '+valid);
-      
-      if(!ticks||ticks.length===0){
-        log('No ticks parsed. Check file format.');
-        document.getElementById('convertBtn').disabled=false;
-        return;
-      }
-
-      const sym=document.getElementById('sym').value.toUpperCase().replace(/[^A-Z0-9]/g,'');
-      const dig=parseInt(document.getElementById('dig').value)||5;
-      const timeframe=parseInt(document.getElementById('tf').value)||1;
-
-      const fxt=makeFxt(sym,dig,min,max,ticks);
-      const hst=makeHst(sym,dig,timeframe,min,max,ticks);
-
-      document.getElementById('out').innerHTML=`
-<p><strong>${valid}</strong> ticks: ${new Date(min*1000).toISOString().split('T')[0]} → ${new Date(max*1000).toISOString().split('T')[0]}</p>
-<a href="${fxt.url}" download="${sym}_${fmt(min)}.fxt" class="dl">Download .fxt (${(fxt.size/1024).toFixed(1)} KB)</a>
-<a href="${hst.url}" download="${sym}${timeframe}.hst" class="dl">Download .hst (${(hst.size/1024).toFixed(1)} KB)</a>
-`;
-      log('Files ready. Save them to your MT4 tester/ and history/ folders.');
-      document.getElementById('convertBtn').disabled=false;
-    }, 100);
-  };
-  
-  reader.onerror=function(){
-    alert('Failed to read file');
-    document.getElementById('convertBtn').disabled=false;
-    setProgress(-1);
-  }
-  reader.readAsText(file);
+const reader=new FileReader();
+reader.onload=function(e){
+const text=e.target.result;
+const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
+log('Loaded '+lines.length+' lines. Starting parse...');
+worker.postMessage({lines});
+};
+reader.onerror=function(){alert('Failed to read file');document.getElementById('convertBtn').disabled=false;setProgress(-1);}
+reader.readAsText(file);
 }
 
-// Attach event listener
-document.getElementById('convertBtn').addEventListener('click', run);
+worker.onmessage=function(e){
+if(e.data.progress!==undefined){setProgress(e.data.progress);return;}
+setProgress(100);
+const {ticks,min,max,valid}=e.data;
+log('Parsing complete. Valid ticks: '+valid);
+if(!ticks||ticks.length===0){log('No ticks parsed. Check file format.');document.getElementById('convertBtn').disabled=false;return;}
+
+const sym=document.getElementById('sym').value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+const dig=parseInt(document.getElementById('dig').value)||5;
+const timeframe=parseInt(document.getElementById('tf').value)||1;
+
+const fxt=makeFxt(sym,dig,min,max,ticks);
+const hst=makeHst(sym,dig,timeframe,min,max,ticks);
+
+document.getElementById('out').innerHTML=`<p><strong>${valid}</strong> ticks: ${new Date(min*1000).toISOString().split('T')[0]} → ${new Date(max*1000).toISOString().split('T')[0]}</p>
+<a href="${fxt.url}" download="${sym}_${fmt(min)}.fxt" class="dl">Download .fxt (${(fxt.size/1024).toFixed(1)} KB)</a>
+<a href="${hst.url}" download="${sym}${timeframe}.hst" class="dl">Download .hst (${(hst.size/1024).toFixed(1)} KB)</a>`;
+log('Files ready. Save them to your MT4 tester/ and history/ folders.');
+document.getElementById('convertBtn').disabled=false;
+};
 
 // FXT builder
 function makeFxt(sym,dig,from,to,ticks){
-  const buf=new ArrayBuffer(40+ticks.length*72);
-  const v=new DataView(buf);
-  v.setInt32(0,401,true);
-  if(typeof v.setBigInt64==='function'){
-    v.setBigInt64(8,BigInt(from),true);
-    v.setBigInt64(16,BigInt(to),true);
-  } else {
-    v.setInt32(8,from,true);
-    v.setInt32(16,to,true);
-  }
-  v.setInt32(24,0,true);
-  v.setInt32(28,1,true);
-  v.setInt32(32,ticks.length,true);
-  let off=40;
-  ticks.forEach(t=>{
-    if(typeof v.setBigInt64==='function'){
-      v.setBigInt64(off,BigInt(t.ct),true);
-    } else {
-      v.setInt32(off,t.ct,true);
-    }
-    v.setFloat64(off+8,t.open,true);
-    v.setFloat64(off+16,t.low,true);
-    v.setFloat64(off+24,t.high,true);
-    v.setFloat64(off+32,t.close,true);
-    v.setFloat64(off+40,t.vol,true);
-    off+=72;
-  });
-  const blob=new Blob([buf]);
-  return {url:URL.createObjectURL(blob),size:blob.size};
+const buf=new ArrayBuffer(40+ticks.length*72);
+const v=new DataView(buf);
+v.setInt32(0,401,true);
+if(typeof v.setBigInt64==='function'){v.setBigInt64(8,BigInt(from),true);v.setBigInt64(16,BigInt(to),true);}
+else{v.setInt32(8,from,true);v.setInt32(16,to,true);}
+v.setInt32(24,0,true);v.setInt32(28,1,true);v.setInt32(32,ticks.length,true);
+let off=40;
+ticks.forEach(t=>{
+if(typeof v.setBigInt64==='function'){v.setBigInt64(off,BigInt(t.ct),true);}else{v.setInt32(off,t.ct,true);}
+v.setFloat64(off+8,t.open,true);v.setFloat64(off+16,t.low,true);
+v.setFloat64(off+24,t.high,true);v.setFloat64(off+32,t.close,true);
+v.setFloat64(off+40,t.vol,true);
+off+=72;
+});
+const blob=new Blob([buf]);
+return {url:URL.createObjectURL(blob),size:blob.size};
 }
 
 // HST builder
 function makeHst(sym,dig,timeframe,from,to,ticks){
-  const tfSeconds=timeframe*60;
-  const buckets={};
-  ticks.forEach(t=>{
-    const bucketStart=Math.floor(t.ct/tfSeconds)*tfSeconds;
-    if(!buckets[bucketStart]){
-      buckets[bucketStart]={o:t.open,h:t.high,l:t.low,c:t.close,v:t.vol,time:bucketStart};
-    } else {
-      const b=buckets[bucketStart];
-      b.h=Math.max(b.h,t.high);
-      b.l=Math.min(b.l,t.low);
-      b.c=t.close;
-      b.v+=t.vol;
-    }
-  });
-  const bars=Object.values(buckets).sort((a,b)=>a.time-b.time);
-  const buf=new ArrayBuffer(156+bars.length*60);
-  const v=new DataView(buf);
-  v.setInt32(0,401,true);
-  new TextEncoder().encode(sym.padEnd(12,'\0')).forEach((b,i)=>v.setUint8(4+i,b));
-  v.setInt32(64,timeframe,true);
-  v.setInt32(68,dig,true);
-  let off=156;
-  bars.forEach(b=>{
-    v.setInt32(off,b.time,true);
-    v.setFloat64(off+8,b.o,true);
-    v.setFloat64(off+16,b.h,true);
-    v.setFloat64(off+24,b.l,true);
-    v.setFloat64(off+32,b.c,true);
-    v.setFloat64(off+40,b.v,true);
-    v.setInt32(off+52,0,true);
-    v.setInt32(off+56,0,true);
-    off+=60;
-  });
-  const blob=new Blob([buf]);
-  return {url:URL.createObjectURL(blob),size:blob.size};
+const tfSeconds=timeframe*60;
+const buckets={};
+ticks.forEach(t=>{
+const bucketStart=Math.floor(t.ct/tfSeconds)*tfSeconds;
+if(!buckets[bucketStart]){buckets[bucketStart]={o:t.open,h:t.high,l:t.low,c:t.close,v:t.vol,time:bucketStart};}
+else{const b=buckets[bucketStart];b.h=Math.max(b.h,t.high);b.l=Math.min(b.l,t.low);b.c=t.close;b.v+=t.vol;}
+});
+const bars=Object.values(buckets).sort((a,b)=>a.time-b.time);
+const buf=new ArrayBuffer(156+bars.length*60);
+const v=new DataView(buf);
+v.setInt32(0,401,true);
+new TextEncoder().encode(sym.padEnd(12,'\0')).forEach((b,i)=>v.setUint8(4+i,b));
+v.setInt32(64,timeframe,true);
+v.setInt32(68,dig,true);
+let off=156;
+bars.forEach(b=>{
+v.setInt32(off,b.time,true);
+v.setFloat64(off+8,b.o,true);v.setFloat64(off+16,b.h,true);
+v.setFloat64(off+24,b.l,true);v.setFloat64(off+32,b.c,true);
+v.setFloat64(off+40,b.v,true);
+v.setInt32(off+52,0,true);v.setInt32(off+56,0,true);
+off+=60;
+});
+const blob=new Blob([buf]);
+return {url:URL.createObjectURL(blob),size:blob.size};
 }
 
-function fmt(ts){
-  const d=new Date(ts*1000);
-  return d.getFullYear()+('0'+(d.getMonth()+1)).slice(-2)+('0'+d.getDate()).slice(-2);
-}
+function fmt(ts){const d=new Date(ts*1000);return d.getFullYear()+('0'+(d.getMonth()+1)).slice(-2)+('0'+d.getDate()).slice(-2);}
 </script>
 </body>
 </html>
