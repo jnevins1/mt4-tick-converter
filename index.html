@@ -12,12 +12,13 @@
   .out{margin-top:20px}
   .dl{background:#28a745;color:#fff;padding:10px;border-radius:5px;text-decoration:none;display:inline-block;margin:5px}
   .log{font-family:monospace;background:#f0f0f0;padding:10px;border-radius:5px;max-height:200px;overflow:auto;margin:10px 0}
+  iframe{width:100%;border:1px solid #ccc;margin-top:20px}
 </style>
 </head>
 <body>
 <div class="c">
   <h1>MT4 .fxt + .hst Converter</h1>
-  <p>Format: <code>10.11.2025 00:00:00.056 GMT-0500 1.15611 1.1561 0.9 0.9</code></p>
+  <p>Format: <code>10.11.2025 00:00:00.056 GMT-0500,1.15611,1.1561,0.9,0.9</code></p>
 
   <input type="file" id="csv" accept=".csv,.txt"><br>
 
@@ -33,45 +34,96 @@
 
   <div id="log" class="log"></div>
   <div class="out" id="out"></div>
+
+  <h2>Download Historical Data from Dukascopy</h2>
+  <p>Use the tool below to get historical tick data for your instrument:</p>
+  <div id="dukascopy"></div>
 </div>
 
+<script type="text/javascript">
+DukascopyApplet = {
+  "type":"historical_data_feed",
+  "params":{
+    "header":false,
+    "availableInstruments":"l:",
+    "width":"100%",
+    "height":"550",
+    "adv":"popup"
+  }
+};
+</script>
+<script type="text/javascript" src="https://freeserv-static.dukascopy.com/2.0/core.js"></script>
+
 <script>
-// --- Web Worker (background parsing) ---
+// --- Web Worker (robust CSV parser) ---
 const workerCode = `
 self.onmessage = function(e) {
   const lines = e.data.lines;
   const ticks = [];
   let min = Infinity, max = 0;
   let valid = 0;
+  let skipped = 0;
 
   for (let i = 0; i < lines.length; i++) {
-    const parts = lines[i].trim().split(/\\\\s+/);
-    if (parts.length < 7) continue;
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    // Dukascopy CSV format: date time tz,bid,ask,vol1,vol2
+    const parts = line.split(/[,]+/).map(p => p.trim());
+    if (parts.length < 5) {
+      skipped++;
+      continue;
+    }
 
     try {
       const [dd, mm, yyyy] = parts[0].split('.').map(Number);
-      const [hh, mi, sec_ms = '0'] = parts[1].split(':');
-      const [ss, ms = '0'] = sec_ms.split('.');
-      const local = new Date(yyyy, mm-1, dd, hh, mi, ss, (ms+'000').slice(0,3));
-      const tz = parts[2];
-      const sign = tz[3] === '-' ? -1 : 1;
-      const offH = parseInt(tz.slice(4,6)) || 0;
-      const offM = parseInt(tz.slice(6,8)) || 0;
-      const offsetSec = (offH * 3600 + offM * 60) * sign;
-      const bid = parseFloat(parts[3]);
-      const ask = parseFloat(parts[4]);
-      const vol = (parseFloat(parts[5]) || 0) + (parseFloat(parts[6]) || 0);
-      if (isNaN(bid) || isNaN(ask)) continue;
+      const [hh, mi, ss_ms='0'] = parts[1].split(':');
+      const [ss, ms='0'] = ss_ms.split('.');
 
-      const utc = Math.floor(local.getTime() / 1000) - offsetSec;
+      const bid = parseFloat(parts[2]);
+      const ask = parseFloat(parts[3]);
+      const vol1 = parseFloat(parts[4]) || 0;
+      const vol2 = parseFloat(parts[5]) || 0;
+
+      // Parse timezone offset (GMT-0500)
+      let tzOffset = 0;
+      if (parts[1] && parts[1].includes('GMT')) {
+        const tz = parts[1].match(/GMT([+-])(\\d{2})(\\d{2})/);
+        if (tz) {
+          const sign = tz[1] === '-' ? -1 : 1;
+          const offH = parseInt(tz[2]) || 0;
+          const offM = parseInt(tz[3]) || 0;
+          tzOffset = sign * (offH*3600 + offM*60);
+        }
+      }
+
+      const utc = Date.UTC(yyyy, mm-1, dd, hh, mi, ss, ms.padEnd(3,'0')) / 1000 - tzOffset;
+
+      if (isNaN(bid) || isNaN(ask)) {
+        skipped++;
+        continue;
+      }
+
+      ticks.push({
+        ct: Math.floor(utc),
+        open: bid,
+        high: Math.max(bid, ask),
+        low: Math.min(bid, ask),
+        close: bid,
+        vol: vol1 + vol2
+      });
+
       min = Math.min(min, utc);
       max = Math.max(max, utc);
-      ticks.push({ct: utc, open: bid, high: ask, low: bid, close: ask, vol});
       valid++;
-    } catch (err) {}
+
+    } catch(err) {
+      skipped++;
+      continue;
+    }
   }
 
-  self.postMessage({ticks, min, max, valid});
+  self.postMessage({ ticks, min, max, valid, skipped });
 };
 `;
 
@@ -80,14 +132,14 @@ const worker = new Worker(URL.createObjectURL(blob));
 
 function run() {
   const file = document.getElementById('csv').files[0];
-  if (!file) return alert('Select file');
+  if (!file) return alert('Select a file');
   log('Reading file...');
 
   const reader = new FileReader();
   reader.onload = function(e) {
     const text = e.target.result;
-    const lines = text.split(/\\r?\\n/).map(l => l.trim()).filter(l => l);
-    log(`Loaded ${lines.length} lines. Parsing in background...`);
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l);
+    log(\`Loaded \${lines.length} lines. Parsing in background...\`);
 
     worker.postMessage({ lines });
   };
@@ -95,8 +147,8 @@ function run() {
 }
 
 worker.onmessage = function(e) {
-  const { ticks, min, max, valid } = e.data;
-  log(`Parsed ${valid} valid ticks`);
+  const { ticks, min, max, valid, skipped } = e.data;
+  log(\`Parsed \${valid} valid ticks, skipped \${skipped} invalid lines.\`);
 
   const sym = document.getElementById('sym').value.toUpperCase();
   const dig = parseInt(document.getElementById('dig').value);
@@ -104,22 +156,26 @@ worker.onmessage = function(e) {
   const fxt = makeFxt(sym, dig, min, max, ticks);
   const hst = makeHst(sym, dig, min, max, ticks);
 
-  document.getElementById('out').innerHTML = `
-    <p><strong>${valid}</strong> ticks: ${new Date(min*1000).toISOString().split('T')[0]} → ${new Date(max*1000).toISOString().split('T')[0]}</p>
-    <a href="${fxt.url}" download="${sym}_${fmt(min)}.fxt" class="dl">Download .fxt (${(fxt.size/1024).toFixed(1)} KB)</a>
-    <a href="${hst.url}" download="${sym}1440.hst" class="dl">Download .hst (${(hst.size/1024).toFixed(1)} KB)</a>
-  `;
+  document.getElementById('out').innerHTML = \`
+    <p><strong>\${valid}</strong> ticks: \${new Date(min*1000).toISOString().split('T')[0]} → \${new Date(max*1000).toISOString().split('T')[0]}</p>
+    <a href="\${fxt.url}" download="\${sym}_\${fmt(min)}.fxt" class="dl">Download .fxt (\${(fxt.size/1024).toFixed(1)} KB)</a>
+    <a href="\${hst.url}" download="\${sym}1440.hst" class="dl">Download .hst (\${(hst.size/1024).toFixed(1)} KB)</a>
+  \`;
 };
 
-// --- makeFxt ---
+// --- FXT generator ---
 function makeFxt(sym, dig, from, to, ticks) {
   const buf = new ArrayBuffer(40 + ticks.length * 72);
   const v = new DataView(buf);
-  v.setInt32(0, 401, true); v.setInt64(8, from, true); v.setInt64(16, to, true);
-  v.setInt32(24, 0, true); v.setInt32(28, 1, true); v.setInt32(32, ticks.length, true);
+  v.setInt32(0, 401, true);
+  v.setBigInt64(8, BigInt(from), true);
+  v.setBigInt64(16, BigInt(to), true);
+  v.setInt32(24, 0, true);
+  v.setInt32(28, 1, true);
+  v.setInt32(32, ticks.length, true);
   let off = 40;
   ticks.forEach(t => {
-    v.setInt64(off, t.ct, true);
+    v.setBigInt64(off, BigInt(t.ct), true);
     v.setFloat64(off + 8, t.open, true);
     v.setFloat64(off + 16, t.low, true);
     v.setFloat64(off + 24, t.high, true);
@@ -131,7 +187,7 @@ function makeFxt(sym, dig, from, to, ticks) {
   return { url: URL.createObjectURL(blob), size: blob.size };
 }
 
-// --- makeHst ---
+// --- HST generator ---
 function makeHst(sym, dig, from, to, ticks) {
   const day = {};
   ticks.forEach(t => {
@@ -145,14 +201,19 @@ function makeHst(sym, dig, from, to, ticks) {
   const buf = new ArrayBuffer(156 + bars.length * 60);
   const v = new DataView(buf);
   v.setInt32(0, 401, true);
-  new TextEncoder().encode(sym.padEnd(12, '\\0')).forEach((b, i) => v.setUint8(4 + i, b));
-  v.setInt32(64, 1440, true); v.setInt32(68, dig, true);
+  new TextEncoder().encode(sym.padEnd(12,'\0')).forEach((b,i)=>v.setUint8(4+i,b));
+  v.setInt32(64, 1440, true);
+  v.setInt32(68, dig, true);
   let off = 156;
   bars.forEach(b => {
     v.setInt32(off, b.time, true);
-    v.setFloat64(off + 8, b.o, true); v.setFloat64(off + 16, b.h, true);
-    v.setFloat64(off + 24, b.l, true); v.setFloat64(off + 32, b.c, true);
-    v.setFloat64(off + 40, b.v, true); v.setInt32(off + 52, 0, true); v.setInt32(off + 56, 0, true);
+    v.setFloat64(off + 8, b.o, true);
+    v.setFloat64(off + 16, b.h, true);
+    v.setFloat64(off + 24, b.l, true);
+    v.setFloat64(off + 32, b.c, true);
+    v.setFloat64(off + 40, b.v, true);
+    v.setInt32(off + 52, 0, true);
+    v.setInt32(off + 56, 0, true);
     off += 60;
   });
   const blob = new Blob([buf]);
